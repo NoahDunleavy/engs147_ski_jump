@@ -17,36 +17,36 @@
 
 //Pins
 #define PIN_TOF_RESET 51  
-#define PIN_IMU_READY 23
 #define PIN_BUTTON 13
 #define PIN_MOTOR_PWM 12
 
 //Debug Pins
-#define DBG_PIN_MOTOR 31
-#define DBG_PIN_ORIENT 32
-#define DBG_PIN_IMU 33
-#define DBG_PIN_TOF 34
 #define PIN_LED_RED 35
 #define PIN_LED_GREEN 39
 #define PIN_LED_BLUE 37
 
 //Timing Parameters
-#define RUN_TIME_MS 50000 //amount of time to give system before shsutdown AFTER on-ramp starts
-#define MAX_AIR_TIME_MS 550
-#define DT_ORIENT_MS 5
+#define RUN_TIME_MS 10000 //amount of time to give system before shsutdown AFTER on-ramp starts
 #define HANG_TIME_MS 200
-
 #define TIMING_TOLERANCE_US 400  //how far off each timing loop can be from goal and still be 'ok'
 #define IMU_ROUNDTRIP_MS 4  //stays under 4k us for orient and rad_sec
-#define NUM_SAMPLES 2000
 
-#define PWM_RAMP 160
-#define PWM_RAMP_UP_TIME_MS 900
 
-//Control Constants
-#define B_E0 10.0
+
+
+
+//Tuneable
+#define DT_ORIENT_MS 5
+double ref_angle = 0.0;//PI/2.0;  //pi / 2 offset for orientation fixes
+#define B_E0 1.0
 #define B_E1 0.0
 #define B_U1 0.0
+#define PWM_RAMP 120
+#define PWM_RAMP_UP_TIME_MS 500
+#define MAX_AIR_TIME_MS 550
+
+
+
 
 double previous_error = 0;
 double previous_input = 0;
@@ -65,7 +65,7 @@ volatile bool kicked = false;
 
 uint8_t range = 0, status = 0;
 
-double ref_angle = PI;
+
 
 Adafruit_BNO055 sensor_imu = Adafruit_BNO055(55, BNO055_ADDRESS, &Wire);
 Adafruit_VL6180X sensor_tof = Adafruit_VL6180X();
@@ -138,14 +138,6 @@ void loop() {
   unsigned long initial_start_time = current_time;
   unsigned long air_start_time = current_time;  
 
-
-  unsigned long timings[NUM_SAMPLES];
-  unsigned long times_left[NUM_SAMPLES];
-  unsigned long time_after_angle[NUM_SAMPLES];
-  double angles[NUM_SAMPLES];
-  int new_angles[NUM_SAMPLES];
-  unsigned long time_ndx = 0;
-
   while ( (current_time < (initial_start_time + RUN_TIME_MS*1000)) && (current_state != LANDED)){ //only for a certain amount of time
     if (air_start_time != 0){ //if we have assigned a value
       if (current_time > air_start_time + (MAX_AIR_TIME_MS * 1000)){
@@ -164,8 +156,7 @@ void loop() {
     unsigned long dt_us = current_time - oreint_timer.previous_start_time_us;  //force dt to be 0 for first pass, mostly for timing checking
     if( !(oreint_timer.running) || (dt_us >= oreint_timer.sample_period_us) ){ 
       double dt_sec = (dt_us) / (double)(1000000);  
-      timings[time_ndx] = dt_us;
-  
+      
       //Motor Runnings
       if (current_state == IN_AIR){
         double angle_error = ref_angle - absolute_pitch_rad;
@@ -203,7 +194,6 @@ void loop() {
 
       //update things as we have time
       unsigned long time_left_us = oreint_timer.next_start_us - micros();  //get how much time until the next loop
-      times_left[time_ndx] = time_left_us;
       if (time_left_us >= (IMU_ROUNDTRIP_MS) * 1000){ //if we have time 
         sensor_imu.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
         sensor_imu.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);
@@ -222,14 +212,7 @@ void loop() {
         }
         prev_processed_pitch_rad = processed_pitch_rad;
         absolute_pitch_rad = processed_pitch_rad + num_rotations*2.0*PI;
-        new_angles[time_ndx] = 1;
       }
-      else{
-        new_angles[time_ndx] = 0;
-      }
-      time_after_angle[time_ndx] = oreint_timer.next_start_us - micros();
-      angles[time_ndx] = absolute_pitch_rad;
-      time_ndx++;
       
     }
     
@@ -294,26 +277,6 @@ void loop() {
     kicked = true;  //kick watchdog
   }
   //Serial.println("Done While!");
-
-  unsigned long min_time_left = DT_ORIENT_MS * 1000;
-  int num_new_angles = 0;
-  for (int ndx = 0; ndx < time_ndx; ndx++){
-    Serial.print(timings[ndx]); 
-    Serial.print(", ");
-    Serial.print(times_left[ndx]);
-    Serial.print(", ");
-    Serial.print(new_angles[ndx]);
-    Serial.print(", ");
-    Serial.print(time_after_angle[ndx]);
-    Serial.print(", ");
-    Serial.println(angles[ndx]);
-
-    min_time_left = min(min_time_left, time_after_angle[ndx]);
-    num_new_angles += new_angles[ndx];
-  }
-  Serial.println(min_time_left);
-  Serial.println(num_new_angles);
-
   set_motor_speed(0);
   if (current_state != LANDED){
     set_RGB(255, 255, 255);

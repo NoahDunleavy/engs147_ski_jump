@@ -1,3 +1,7 @@
+//SETUP:
+  //Table all the way down, 
+
+
 #include <Wire.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BNO055.h>
@@ -31,22 +35,27 @@
 #define PIN_LED_BLUE 37
 
 //Timing Parameters
-#define RUN_TIME_MS 50000 //amount of time to give system before shsutdown AFTER on-ramp starts
+#define RUN_TIME_MS 5000 //amount of time to give system before shsutdown AFTER on-ramp starts
 #define MAX_AIR_TIME_MS 550
-#define DT_ORIENT_MS 5
+#define RAMP_TO_AIR 60
+#define DT_ORIENT_MS 50
 #define HANG_TIME_MS 200
 
 #define TIMING_TOLERANCE_US 400  //how far off each timing loop can be from goal and still be 'ok'
 #define IMU_ROUNDTRIP_MS 4  //stays under 4k us for orient and rad_sec
-#define NUM_SAMPLES 2000
 
 #define PWM_RAMP 160
 #define PWM_RAMP_UP_TIME_MS 900
 
+//Timing Structure
+#define NUM_TIMERS 2  //one timer for oreint, motor, imu, and tof
+#define NDX_ORIENT 0
+#define NDX_MOTOR 1
+
 //Control Constants
-#define B_E0 10.0
-#define B_E1 0.0
-#define B_U1 0.0
+#define B_E0 10
+#define B_E1 0
+#define B_U1 0
 
 double previous_error = 0;
 double previous_input = 0;
@@ -59,13 +68,14 @@ struct Timing {
   unsigned long sample_period_us = 0;
   unsigned long next_start_us = 0;  //track when we think the next loop should be run
 };
-Timing oreint_timer;
+
+Timing control_timer[NUM_TIMERS];
 
 volatile bool kicked = false;
 
 uint8_t range = 0, status = 0;
 
-double ref_angle = PI;
+double ref_angle = -PI;
 
 Adafruit_BNO055 sensor_imu = Adafruit_BNO055(55, BNO055_ADDRESS, &Wire);
 Adafruit_VL6180X sensor_tof = Adafruit_VL6180X();
@@ -99,7 +109,7 @@ void setup() {
   initEncoderShield();
 
   //Setup timers
-  oreint_timer.sample_period_us = DT_ORIENT_MS * 1000;
+  control_timer[NDX_ORIENT].sample_period_us = DT_ORIENT_MS * 1000;
 
   set_RGB(0, 255, 0); //show we are all good
   delay(2000);  //then wait a bit
@@ -129,7 +139,7 @@ void loop() {
 
   //Sensor Readings
   sensors_event_t orientationData, angVelocityData, accelerometerData;
-  double raw_pitch_rad = 0, raw_speed = 0, prev_processed_pitch_rad = 0, processed_pitch_rad = 0, absolute_pitch_rad = 0;
+  double raw_pitch_rad = 0, raw_speed = 0, prev_processed_pitch_rad, processed_pitch_rad, absolute_pitch_rad = 0;
   int num_rotations = 0;
 
 
@@ -137,14 +147,6 @@ void loop() {
   unsigned long current_time = micros();
   unsigned long initial_start_time = current_time;
   unsigned long air_start_time = current_time;  
-
-
-  unsigned long timings[NUM_SAMPLES];
-  unsigned long times_left[NUM_SAMPLES];
-  unsigned long time_after_angle[NUM_SAMPLES];
-  double angles[NUM_SAMPLES];
-  int new_angles[NUM_SAMPLES];
-  unsigned long time_ndx = 0;
 
   while ( (current_time < (initial_start_time + RUN_TIME_MS*1000)) && (current_state != LANDED)){ //only for a certain amount of time
     if (air_start_time != 0){ //if we have assigned a value
@@ -160,78 +162,82 @@ void loop() {
     }
     
     //Timer application
-    current_time = micros();
-    unsigned long dt_us = current_time - oreint_timer.previous_start_time_us;  //force dt to be 0 for first pass, mostly for timing checking
-    if( !(oreint_timer.running) || (dt_us >= oreint_timer.sample_period_us) ){ 
-      double dt_sec = (dt_us) / (double)(1000000);  
-      timings[time_ndx] = dt_us;
-  
-      //Motor Runnings
-      if (current_state == IN_AIR){
-        double angle_error = ref_angle - absolute_pitch_rad;
-        double motor_input = B_E0 * angle_error + B_E1 * previous_error + B_U1 * previous_input;
-        set_motor_speed(voltage_to_pwm(motor_input));
+    for(int timer_num = 0; timer_num < NUM_TIMERS; timer_num++){
+      current_time = micros();
+      Timing current_timer = control_timer[timer_num];
+      unsigned long dt_us = current_time - current_timer.previous_start_time_us;  //force dt to be 0 for first pass, mostly for timing checking
+      if( !(current_timer.running) || (dt_us >= current_timer.sample_period_us) ){ 
+        
+        if (timer_num == NDX_ORIENT){
+          double dt_sec = (dt_us) / (double)(1000000);  
+          
+          //Motor Runnings
+          if (current_state == IN_AIR){
+            double angle_error = ref_angle - absolute_pitch_rad;
+            double motor_input = B_E0 * angle_error + B_E1 * previous_error + B_U1 * previous_input;
+            set_motor_speed(voltage_to_pwm(motor_input));
 
-        previous_input = motor_input;
-        previous_error = angle_error;
-      }
-      else if (current_state == LANDED){
-        set_motor_speed(0);
-      }
-      else{
+            previous_input = motor_input;
+            previous_error = angle_error;
+          }
+          else if (current_state == LANDED){
+            set_motor_speed(0);
+          }
+          else{
 
-      }
+          }
 
-      //Set flags, update times and indexes
-      oreint_timer.previous_start_time_us = current_time; //the time which this loop started, which next time around will be the previous lop
-
-      //Check data is ok
-
-      //Update timing
-      
-      oreint_timer.next_start_us = oreint_timer.previous_start_time_us + oreint_timer.sample_period_us;  //when the next loop should be running
-
-      
-      //Check timing ok
-      if (oreint_timer.running){  
-        if ( (dt_us - oreint_timer.sample_period_us) > TIMING_TOLERANCE_US){ //if we took longer than tolerated
-          //Serial.print("E"); Serial.print(timer_num); Serial.print(": "); Serial.println(dt_us - oreint_timer.sample_period_us);
         }
-      }
+        else{
 
-      oreint_timer.running = true; //only matters on first go through, 
+        }
 
-      //update things as we have time
-      unsigned long time_left_us = oreint_timer.next_start_us - micros();  //get how much time until the next loop
-      times_left[time_ndx] = time_left_us;
-      if (time_left_us >= (IMU_ROUNDTRIP_MS) * 1000){ //if we have time 
-        sensor_imu.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
-        sensor_imu.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);
-        raw_pitch_rad = orientationData.orientation.z * PI / 180.0;
-        raw_speed = angVelocityData.gyro.x;
-        processed_pitch_rad = (raw_pitch_rad < 0 ? raw_pitch_rad + PI : raw_pitch_rad - PI);
-        if ((prev_processed_pitch_rad > 0) && (processed_pitch_rad < 0)){
-          if (raw_speed < 0){
-            num_rotations++;
+        //Set flags, update times and indexes
+        current_timer.running = true; //only matters on first go through, 
+        current_timer.previous_start_time_us = current_time; //the time which this loop started, which next time around will be the previous lop
+
+        //Check data is ok
+
+        //Update timing
+        
+        current_timer.next_start_us = current_timer.previous_start_time_us + current_timer.sample_period_us;  //when the next loop should be running
+
+        
+        //Check timing ok
+        if (control_timer[timer_num].running){  //if the parent timer event was running (this avoids checking the first loop through, since not pointer logic)
+          if ( (dt_us - current_timer.sample_period_us) > TIMING_TOLERANCE_US){ //if we took longer than tolerated
+            //Serial.print("E"); Serial.print(timer_num); Serial.print(": "); Serial.println(dt_us - current_timer.sample_period_us);
           }
         }
-        else if ((prev_processed_pitch_rad < 0) && (processed_pitch_rad > 0)){
-          if (raw_speed > 0){
-            num_rotations--;
+
+        
+
+        //update things as we have time
+        unsigned long time_left_us = control_timer[NDX_ORIENT].next_start_us - micros();  //get how much time until the next loop
+        if (time_left_us >= (IMU_ROUNDTRIP_MS) * 1000){ //if we have time 
+          sensor_imu.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+          sensor_imu.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);
+          raw_pitch_rad = orientationData.orientation.z * PI / 180.0;
+          raw_speed = angVelocityData.gyro.x;
+          processed_pitch_rad = (raw_pitch_rad < 0 ? raw_pitch_rad + PI : raw_pitch_rad - PI);
+          if ((prev_processed_pitch_rad > 0) && (processed_pitch_rad < 0)){
+            if (raw_speed < 0){
+              num_rotations++;
+            }
           }
+          else if ((prev_processed_pitch_rad < 0) && (processed_pitch_rad > 0)){
+            if (raw_speed > 0){
+              num_rotations--;
+            }
+          }
+          prev_processed_pitch_rad = processed_pitch_rad;
+          absolute_pitch_rad = processed_pitch_rad + num_rotations*2.0*PI;
         }
-        prev_processed_pitch_rad = processed_pitch_rad;
-        absolute_pitch_rad = processed_pitch_rad + num_rotations*2.0*PI;
-        new_angles[time_ndx] = 1;
+
+        control_timer[timer_num] = current_timer; //update the pointed timer
       }
-      else{
-        new_angles[time_ndx] = 0;
-      }
-      time_after_angle[time_ndx] = oreint_timer.next_start_us - micros();
-      angles[time_ndx] = absolute_pitch_rad;
-      time_ndx++;
-      
     }
+
     
     //State Outputs
     if (current_state == IDLE){
@@ -294,26 +300,6 @@ void loop() {
     kicked = true;  //kick watchdog
   }
   //Serial.println("Done While!");
-
-  unsigned long min_time_left = DT_ORIENT_MS * 1000;
-  int num_new_angles = 0;
-  for (int ndx = 0; ndx < time_ndx; ndx++){
-    Serial.print(timings[ndx]); 
-    Serial.print(", ");
-    Serial.print(times_left[ndx]);
-    Serial.print(", ");
-    Serial.print(new_angles[ndx]);
-    Serial.print(", ");
-    Serial.print(time_after_angle[ndx]);
-    Serial.print(", ");
-    Serial.println(angles[ndx]);
-
-    min_time_left = min(min_time_left, time_after_angle[ndx]);
-    num_new_angles += new_angles[ndx];
-  }
-  Serial.println(min_time_left);
-  Serial.println(num_new_angles);
-
   set_motor_speed(0);
   if (current_state != LANDED){
     set_RGB(255, 255, 255);
