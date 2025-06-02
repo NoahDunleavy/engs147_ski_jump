@@ -31,25 +31,23 @@
 #define TIMING_TOLERANCE_US 400  //how far off each timing loop can be from goal and still be 'ok'
 #define IMU_ROUNDTRIP_MS 4  //stays under 4k us for orient and rad_sec
 
-
+#define RAMP_EXIT_DEG 20
 
 
 
 //Tuneable
 #define DT_ORIENT_MS 5
-double ref_angle = 0.0;//PI/2.0;  //pi / 2 offset for orientation fixes
-#define B_E0 1.0
-#define B_E1 0.0
-#define B_U1 0.0
-#define PWM_RAMP 120
-#define PWM_RAMP_UP_TIME_MS 500
+double ref_angle = -0.0;  //pi / 2 offset for orientation fixes
+#define B_E0 22.0
+#define B_E1 -19.8
+#define B_U1 0.2
+#define PWM_RAMP 160
+#define PWM_RAMP_UP_TIME_MS 900
 #define MAX_AIR_TIME_MS 550
 
 
-
-
-double previous_error = 0;
-double previous_input = 0;
+double previous_error = 0;//ref_angle - (RAMP_EXIT_DEG * PI / 180.0);
+double previous_input = 0;//12.0 * PWM_RAMP / 255.0;  //so we exit the ramp with some input already
 
 
 //Structure to define timings
@@ -129,7 +127,8 @@ void loop() {
 
   //Sensor Readings
   sensors_event_t orientationData, angVelocityData, accelerometerData;
-  double raw_pitch_rad = 0, raw_speed = 0, prev_processed_pitch_rad = 0, processed_pitch_rad = 0, absolute_pitch_rad = 0;
+  double raw_pitch_rad = 0, raw_speed = 0, prev_processed_pitch_rad = 0, processed_pitch_rad = 0; 
+  double absolute_pitch_rad = 0;
   int num_rotations = 0;
 
 
@@ -137,6 +136,7 @@ void loop() {
   unsigned long current_time = micros();
   unsigned long initial_start_time = current_time;
   unsigned long air_start_time = current_time;  
+  
 
   while ( (current_time < (initial_start_time + RUN_TIME_MS*1000)) && (current_state != LANDED)){ //only for a certain amount of time
     if (air_start_time != 0){ //if we have assigned a value
@@ -157,6 +157,26 @@ void loop() {
     if( !(oreint_timer.running) || (dt_us >= oreint_timer.sample_period_us) ){ 
       double dt_sec = (dt_us) / (double)(1000000);  
       
+      //Sample data
+      sensor_imu.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
+      sensor_imu.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);
+      raw_pitch_rad = orientationData.orientation.z * PI / 180.0;
+      raw_speed = angVelocityData.gyro.x;
+      processed_pitch_rad = (raw_pitch_rad < 0 ? raw_pitch_rad + PI : raw_pitch_rad - PI);
+      if ((prev_processed_pitch_rad > 0) && (processed_pitch_rad < 0)){
+        if (raw_speed < 0){
+          num_rotations++;
+        }
+      }
+      else if ((prev_processed_pitch_rad < 0) && (processed_pitch_rad > 0)){
+        if (raw_speed > 0){
+          num_rotations--;
+        }
+      }
+      prev_processed_pitch_rad = processed_pitch_rad;
+      absolute_pitch_rad = processed_pitch_rad + num_rotations*2.0*PI;
+
+
       //Motor Runnings
       if (current_state == IN_AIR){
         double angle_error = ref_angle - absolute_pitch_rad;
@@ -193,26 +213,10 @@ void loop() {
       oreint_timer.running = true; //only matters on first go through, 
 
       //update things as we have time
-      unsigned long time_left_us = oreint_timer.next_start_us - micros();  //get how much time until the next loop
-      if (time_left_us >= (IMU_ROUNDTRIP_MS) * 1000){ //if we have time 
-        sensor_imu.getEvent(&orientationData, Adafruit_BNO055::VECTOR_EULER);
-        sensor_imu.getEvent(&angVelocityData, Adafruit_BNO055::VECTOR_GYROSCOPE);
-        raw_pitch_rad = orientationData.orientation.z * PI / 180.0;
-        raw_speed = angVelocityData.gyro.x;
-        processed_pitch_rad = (raw_pitch_rad < 0 ? raw_pitch_rad + PI : raw_pitch_rad - PI);
-        if ((prev_processed_pitch_rad > 0) && (processed_pitch_rad < 0)){
-          if (raw_speed < 0){
-            num_rotations++;
-          }
-        }
-        else if ((prev_processed_pitch_rad < 0) && (processed_pitch_rad > 0)){
-          if (raw_speed > 0){
-            num_rotations--;
-          }
-        }
-        prev_processed_pitch_rad = processed_pitch_rad;
-        absolute_pitch_rad = processed_pitch_rad + num_rotations*2.0*PI;
-      }
+      // unsigned long time_left_us = oreint_timer.next_start_us - micros();  //get how much time until the next loop
+      // if (time_left_us >= (IMU_ROUNDTRIP_MS) * 1000){ //if we have time 
+        
+      // }
       
     }
     
